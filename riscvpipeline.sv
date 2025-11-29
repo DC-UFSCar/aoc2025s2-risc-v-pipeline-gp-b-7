@@ -168,3 +168,104 @@ module riscvpipeline (
    wire [31:0] E_shifter_in = funct3(DE_instr) == 3'b001 ? flip32(E_aluIn1) : E_aluIn1;
    wire [31:0] E_shifter = $signed({E_arith_shift & E_aluIn1[31], E_shifter_in}) >>> E_aluIn2[4:0];
    wire [31:0] E_leftshift = flip32(E_shifter);
+
+   reg [31:0] E_aluOut;
+   always @(*) begin
+      case(funct3(DE_instr))
+         3'b000: E_aluOut = E_minus ? E_aluMinus[31:0] : E_aluPlus;
+         3'b001: E_aluOut = E_leftshift;
+         3'b010: E_aluOut = {31'b0, E_LT};
+         3'b011: E_aluOut = {31'b0, E_LTU};
+         3'b100: E_aluOut = E_aluIn1 ^ E_aluIn2;
+         3'b101: E_aluOut = E_shifter;
+         3'b110: E_aluOut = E_aluIn1 | E_aluIn2;
+         3'b111: E_aluOut = E_aluIn1 & E_aluIn2;
+      endcase
+   end
+
+   reg E_takeBranch;
+   always @(*) begin
+      case (funct3(DE_instr))
+         3'b000: E_takeBranch = E_EQ;
+         3'b001: E_takeBranch = !E_EQ;
+         3'b100: E_takeBranch = E_LT;
+         3'b101: E_takeBranch = !E_LT;
+         3'b110: E_takeBranch = E_LTU;
+         3'b111: E_takeBranch = !E_LTU;
+         default: E_takeBranch = 1'b0;
+      endcase
+   end
+
+   wire E_JumpOrBranch = (
+         isJAL(DE_instr)  ||
+         isJALR(DE_instr) ||
+         (isBranch(DE_instr) && E_takeBranch)
+   );
+
+   wire [31:0] E_JumpOrBranchAddr =
+	isBranch(DE_instr) ? DE_PC + Bimm(DE_instr) :
+	isJAL(DE_instr)    ? DE_PC + Jimm(DE_instr) :
+	/* JALR */           {E_aluPlus[31:1],1'b0} ;
+
+   wire [31:0] E_result =
+	(isJAL(DE_instr) | isJALR(DE_instr)) ? DE_PC+4                :
+	isLUI(DE_instr)                      ? Uimm(DE_instr)         :
+	isAUIPC(DE_instr)                    ? DE_PC + Uimm(DE_instr) :
+                                          E_aluOut               ;
+
+   always @(posedge clk) begin
+      EM_PC      <= DE_PC;
+      EM_instr   <= DE_instr;
+      EM_rs2     <= E_rs2;
+      EM_Eresult <= E_result;
+      EM_addr    <= isStore(DE_instr) ? DE_rs1 + Simm(DE_instr) :
+                                        DE_rs1 + Iimm(DE_instr) ;
+   end
+
+   reg [31:0] MW_PC;
+   reg [31:0] MW_instr;
+   reg [31:0] MW_Eresult;
+   reg [31:0] MW_addr;
+   reg [31:0] MW_Mdata;
+   reg [31:0] MW_IOresult;
+   reg [31:0] MW_CSRresult;
+   wire [2:0] M_funct3 = funct3(EM_instr);
+   wire M_isB = (M_funct3[1:0] == 2'b00);
+   wire M_isH = (M_funct3[1:0] == 2'b01);
+   assign halt = !reset & isEBREAK(MW_instr);
+
+   wire [31:0] M_STORE_data = EM_rs2;
+   assign Address  = EM_addr;
+   assign MemWrite    = isStore(EM_instr);
+   assign WriteData = EM_rs2;
+
+   always @(posedge clk) begin
+      MW_PC        <= EM_PC;
+      MW_instr     <= EM_instr;
+      MW_Eresult   <= EM_Eresult;
+      MW_Mdata     <= ReadData;
+      MW_addr      <= EM_addr;
+   end
+
+
+   wire [2:0] W_funct3 = funct3(MW_instr);
+   wire W_isB = (W_funct3[1:0] == 2'b00);
+   wire W_isH = (W_funct3[1:0] == 2'b01);
+   wire W_sext = !W_funct3[2];
+   wire W_isIO = MW_addr[22];
+
+   assign writeBackData = isLoad(MW_instr) ? MW_Mdata : MW_Eresult;
+   assign writeBackEn = writesRd(MW_instr) && rdId(MW_instr) != 0;
+   assign wbRdId = rdId(MW_instr);
+
+   assign jumpOrBranchAddress = E_JumpOrBranchAddr;
+   assign jumpOrBranch        = E_JumpOrBranch;
+
+
+   always @(posedge clk) begin
+      if (halt) begin
+         $writememh("regs.out", RegisterBank);
+         $finish();
+      end
+   end
+endmodule
